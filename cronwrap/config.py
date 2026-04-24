@@ -1,80 +1,77 @@
-"""Config loader for cronwrap — parses YAML/TOML job definitions."""
+"""Config loading for cronwrap."""
+
+from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from pathlib import Path
+from typing import Any, Optional
 
-try:
-    import tomllib
-except ImportError:
-    try:
-        import tomli as tomllib
-    except ImportError:
-        tomllib = None
-
-try:
-    import yaml
-except ImportError:
-    yaml = None
+from cronwrap.alerting import AlertConfig
 
 
 @dataclass
 class JobConfig:
     name: str
     command: str
-    schedule: str
     retries: int = 0
-    retry_delay: int = 5  # seconds
-    timeout: Optional[int] = None  # seconds
-    alert_on_failure: bool = True
-    alert_on_success: bool = False
-    log_output: bool = True
-    env: dict = field(default_factory=dict)
+    retry_delay: float = 5.0
+    timeout: Optional[float] = None
+    log_file: Optional[str] = None
+    log_level: str = "INFO"
+    alert: AlertConfig = field(default_factory=AlertConfig)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.retries < 0:
-            raise ValueError(f"Job '{self.name}': retries must be >= 0")
-        if self.timeout is not None and self.timeout <= 0:
-            raise ValueError(f"Job '{self.name}': timeout must be a positive integer")
+            raise ValueError("retries must be >= 0")
+        if self.retry_delay < 0:
+            raise ValueError("retry_delay must be >= 0")
 
 
-def _parse_job(name: str, data: dict) -> JobConfig:
-    return JobConfig(
-        name=name,
-        command=data["command"],
-        schedule=data.get("schedule", ""),
-        retries=data.get("retries", 0),
-        retry_delay=data.get("retry_delay", 5),
-        timeout=data.get("timeout", None),
-        alert_on_failure=data.get("alert_on_failure", True),
-        alert_on_success=data.get("alert_on_success", False),
-        log_output=data.get("log_output", True),
-        env=data.get("env", {}),
+def _parse_alert(raw: dict[str, Any]) -> AlertConfig:
+    alert_raw = raw.get("alert", {})
+    return AlertConfig(
+        smtp_host=alert_raw.get("smtp_host", "localhost"),
+        smtp_port=int(alert_raw.get("smtp_port", 25)),
+        smtp_user=alert_raw.get("smtp_user"),
+        smtp_password=alert_raw.get("smtp_password"),
+        from_addr=alert_raw.get("from_addr", "cronwrap@localhost"),
+        to_addrs=alert_raw.get("to_addrs", []),
+        alert_on_failure=alert_raw.get("alert_on_failure", True),
+        alert_on_success=alert_raw.get("alert_on_success", False),
     )
 
 
-def load_config(path: str) -> list[JobConfig]:
-    """Load job configs from a TOML or YAML file."""
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Config file not found: {path}")
+def _parse_job(name: str, raw: dict[str, Any]) -> JobConfig:
+    return JobConfig(
+        name=name,
+        command=raw["command"],
+        retries=int(raw.get("retries", 0)),
+        retry_delay=float(raw.get("retry_delay", 5.0)),
+        timeout=raw.get("timeout"),
+        log_file=raw.get("log_file"),
+        log_level=raw.get("log_level", "INFO").upper(),
+        alert=_parse_alert(raw),
+    )
 
-    ext = os.path.splitext(path)[1].lower()
 
-    if ext == ".toml":
-        if tomllib is None:
-            raise ImportError("tomllib/tomli is required to parse TOML configs")
-        with open(path, "rb") as f:
-            raw = tomllib.load(f)
-    elif ext in (".yaml", ".yml"):
-        if yaml is None:
-            raise ImportError("pyyaml is required to parse YAML configs")
-        with open(path, "r") as f:
-            raw = yaml.safe_load(f)
+def load_config(path: str | Path) -> dict[str, JobConfig]:
+    path = Path(path)
+    suffix = path.suffix.lower()
+
+    if suffix == ".toml":
+        try:
+            import tomllib  # Python 3.11+
+        except ImportError:
+            import tomli as tomllib  # type: ignore[no-redef]
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+    elif suffix in (".yaml", ".yml"):
+        import yaml
+        with open(path) as fh:
+            data = yaml.safe_load(fh)
     else:
-        raise ValueError(f"Unsupported config format: {ext}")
+        raise ValueError(f"Unsupported config format: {suffix}")
 
-    jobs_data = raw.get("jobs", {})
-    if not jobs_data:
-        raise ValueError("Config file contains no jobs")
-
-    return [_parse_job(name, data) for name, data in jobs_data.items()]
+    jobs_raw: dict[str, Any] = data.get("jobs", {})
+    return {name: _parse_job(name, raw) for name, raw in jobs_raw.items()}

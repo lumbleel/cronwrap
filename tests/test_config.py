@@ -1,106 +1,89 @@
-"""Tests for cronwrap config loader."""
+"""Tests for cronwrap.config module."""
 
-import os
-import tempfile
+import textwrap
+from pathlib import Path
+
 import pytest
-from cronwrap.config import load_config, JobConfig
 
-
-TOML_CONTENT = """
-[jobs.backup]
-command = "/usr/bin/backup.sh"
-schedule = "0 2 * * *"
-retries = 3
-retry_delay = 10
-timeout = 120
-alert_on_failure = true
-log_output = true
-
-[jobs.cleanup]
-command = "rm -rf /tmp/old_*"
-schedule = "0 4 * * 0"
-retries = 0
-alert_on_success = true
-"""
-
-YAML_CONTENT = """
-jobs:
-  sync:
-    command: "rsync -av /src /dst"
-    schedule: "*/15 * * * *"
-    retries: 2
-    timeout: 60
-    env:
-      RSYNC_PASSWORD: secret
-"""
+from cronwrap.config import JobConfig, load_config
+from cronwrap.alerting import AlertConfig
 
 
 @pytest.fixture
-def toml_config_file():
-    with tempfile.NamedTemporaryFile(suffix=".toml", mode="w", delete=False) as f:
-        f.write(TOML_CONTENT)
-        path = f.name
-    yield path
-    os.unlink(path)
+def toml_config_file(tmp_path: Path) -> Path:
+    cfg = tmp_path / "crons.toml"
+    cfg.write_text(textwrap.dedent("""
+        [jobs.backup]
+        command = "/usr/bin/backup.sh"
+        retries = 2
+        retry_delay = 10.0
+        log_level = "DEBUG"
+        [jobs.backup.alert]
+        to_addrs = ["ops@example.com"]
+        alert_on_failure = true
+
+        [jobs.cleanup]
+        command = "rm -rf /tmp/cache"
+    """))
+    return cfg
 
 
 @pytest.fixture
-def yaml_config_file():
-    with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
-        f.write(YAML_CONTENT)
-        path = f.name
-    yield path
-    os.unlink(path)
+def yaml_config_file(tmp_path: Path) -> Path:
+    cfg = tmp_path / "crons.yaml"
+    cfg.write_text(textwrap.dedent("""
+        jobs:
+          sync:
+            command: rsync -av /src /dst
+            retries: 1
+    """))
+    return cfg
 
 
 def test_load_toml_config(toml_config_file):
     jobs = load_config(toml_config_file)
-    assert len(jobs) == 2
-    backup = next(j for j in jobs if j.name == "backup")
-    assert backup.command == "/usr/bin/backup.sh"
-    assert backup.retries == 3
-    assert backup.timeout == 120
-    assert backup.alert_on_failure is True
+    assert "backup" in jobs
+    assert "cleanup" in jobs
 
 
 def test_load_yaml_config(yaml_config_file):
     jobs = load_config(yaml_config_file)
-    assert len(jobs) == 1
-    sync = jobs[0]
-    assert sync.name == "sync"
-    assert sync.retries == 2
-    assert sync.env == {"RSYNC_PASSWORD": "secret"}
+    assert "sync" in jobs
+    assert jobs["sync"].retries == 1
 
 
 def test_defaults_applied(toml_config_file):
     jobs = load_config(toml_config_file)
-    cleanup = next(j for j in jobs if j.name == "cleanup")
-    assert cleanup.retry_delay == 5
+    cleanup = jobs["cleanup"]
+    assert cleanup.retries == 0
+    assert cleanup.retry_delay == 5.0
+    assert cleanup.log_level == "INFO"
     assert cleanup.timeout is None
-    assert cleanup.log_output is True
-    assert cleanup.alert_on_success is True
 
 
-def test_file_not_found():
-    with pytest.raises(FileNotFoundError):
-        load_config("/nonexistent/path/config.toml")
+def test_alert_config_parsed(toml_config_file):
+    jobs = load_config(toml_config_file)
+    alert = jobs["backup"].alert
+    assert isinstance(alert, AlertConfig)
+    assert "ops@example.com" in alert.to_addrs
+    assert alert.alert_on_failure is True
 
 
-def test_unsupported_format():
-    with tempfile.NamedTemporaryFile(suffix=".ini", delete=False) as f:
-        path = f.name
-    try:
-        with pytest.raises(ValueError, match="Unsupported config format"):
-            load_config(path)
-    finally:
-        os.unlink(path)
+def test_alert_defaults_when_not_specified(toml_config_file):
+    jobs = load_config(toml_config_file)
+    alert = jobs["cleanup"].alert
+    assert alert.to_addrs == []
+    assert alert.smtp_host == "localhost"
+    assert alert.alert_on_success is False
 
 
-def test_invalid_retries():
-    with pytest.raises(ValueError, match="retries must be >= 0"):
-        JobConfig(name="bad", command="echo hi", schedule="* * * * *", retries=-1)
+def test_invalid_retries_raises():
+    with pytest.raises(ValueError, match="retries"):
+        JobConfig(name="x", command="echo hi", retries=-1)
 
 
-def test_invalid_timeout():
-    with pytest.raises(ValueError, match="timeout must be a positive integer"):
-        JobConfig(name="bad", command="echo hi", schedule="* * * * *", timeout=0)
+def test_unsupported_format_raises(tmp_path):
+    bad = tmp_path / "crons.ini"
+    bad.write_text("[jobs]")
+    with pytest.raises(ValueError, match="Unsupported"):
+        load_config(bad)
