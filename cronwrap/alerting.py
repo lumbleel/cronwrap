@@ -1,69 +1,54 @@
-"""Alerting module for cronwrap — sends notifications on job failure or success."""
+"""Alert configuration and message building for cronwrap."""
 
 from __future__ import annotations
 
-import smtplib
-import logging
 from dataclasses import dataclass, field
-from email.message import EmailMessage
-from typing import Optional
+from typing import TYPE_CHECKING
 
-from cronwrap.runner import JobResult
-
-logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from cronwrap.runner import JobResult
 
 
 @dataclass
 class AlertConfig:
-    smtp_host: str = "localhost"
+    on_failure: bool = True
+    on_success: bool = False
+    to_email: str = ""
+    from_email: str = "cronwrap@localhost"
+    smtp_host: str = ""
     smtp_port: int = 25
-    smtp_user: Optional[str] = None
-    smtp_password: Optional[str] = None
-    from_addr: str = "cronwrap@localhost"
-    to_addrs: list[str] = field(default_factory=list)
-    alert_on_failure: bool = True
-    alert_on_success: bool = False
+    webhook_url: str = ""
+    extra: dict = field(default_factory=dict)
 
 
-def _build_message(job_name: str, result: JobResult, from_addr: str, to_addrs: list[str]) -> EmailMessage:
-    msg = EmailMessage()
+def _build_message(alert: AlertConfig, result: "JobResult") -> tuple[str, str]:
+    """Return (subject, body) for the given job result."""
     status = "SUCCESS" if result.success else "FAILURE"
-    msg["Subject"] = f"[cronwrap] Job '{job_name}' {status}"
-    msg["From"] = from_addr
-    msg["To"] = ", ".join(to_addrs)
+    subject = f"[cronwrap] {status}: {result.job_name}"
 
-    body_lines = [
-        f"Job: {job_name}",
-        f"Status: {status}",
-        f"Return code: {result.returncode}",
-        f"Duration: {result.duration:.2f}s",
+    lines = [
+        f"Job      : {result.job_name}",
+        f"Status   : {status}",
+        f"Exit code: {result.returncode}",
+        f"Duration : {result.duration:.2f}s",
+        f"Attempts : {result.attempts}",
     ]
     if result.stdout:
-        body_lines += ["", "--- stdout ---", result.stdout]
+        lines += ["", "--- stdout ---", result.stdout.strip()]
     if result.stderr:
-        body_lines += ["", "--- stderr ---", result.stderr]
+        lines += ["", "--- stderr ---", result.stderr.strip()]
 
-    msg.set_content("\n".join(body_lines))
-    return msg
+    return subject, "\n".join(lines)
 
 
-def send_alert(job_name: str, result: JobResult, alert_cfg: AlertConfig) -> bool:
-    """Send an email alert for the given job result. Returns True if sent."""
-    should_alert = (not result.success and alert_cfg.alert_on_failure) or (
-        result.success and alert_cfg.alert_on_success
-    )
-    if not should_alert or not alert_cfg.to_addrs:
+def send_alert(alert: AlertConfig, result: "JobResult") -> bool:
+    """Return True if a notification should be dispatched, False otherwise.
+
+    Also handles legacy direct email sending for backwards compatibility;
+    actual channel dispatch is handled by cronwrap.notify.dispatch.
+    """
+    if result.success and not alert.on_success:
         return False
-
-    msg = _build_message(job_name, result, alert_cfg.from_addr, alert_cfg.to_addrs)
-
-    try:
-        with smtplib.SMTP(alert_cfg.smtp_host, alert_cfg.smtp_port) as smtp:
-            if alert_cfg.smtp_user and alert_cfg.smtp_password:
-                smtp.login(alert_cfg.smtp_user, alert_cfg.smtp_password)
-            smtp.send_message(msg)
-        logger.info("Alert sent for job '%s' to %s", job_name, alert_cfg.to_addrs)
-        return True
-    except smtplib.SMTPException as exc:
-        logger.error("Failed to send alert for job '%s': %s", job_name, exc)
+    if not result.success and not alert.on_failure:
         return False
+    return True
