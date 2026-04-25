@@ -76,3 +76,10 @@ def test_report_no_output_by_default(tmp_db):
     _add_run("quiet_job", 0, stdout="secret output", db_path=tmp_db)
     report = generate_report("quiet_job", db_path=tmp_db, include_output=False)
     assert "secret output" not in report
+
+
+def test_report_include_stderr(tmp_db):
+    """Stderr output should appear in the report when include_output is True."""
+    _add_run("err_job", 1, stderr="something went wrong", db_path=tmp_db)
+    report = generate_report("err_job", db_path=tmp_db, include_output=True)
+    assert "something went wrong" in report
