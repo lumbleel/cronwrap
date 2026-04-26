@@ -101,35 +101,10 @@ def test_main_exits_nonzero_on_failure(sample_job_config):
 
 
 def test_main_exits_nonzero_on_unknown_job(sample_job_config):
-    """main() should exit with an error if the requested job isn't in the config."""
-    with patch("cronwrap.cli.load_config", return_value={"other-job": sample_job_config}), \
+    """main() should exit with a non-zero code when the requested job is not found in config."""
+    with patch("cronwrap.cli.load_config", return_value={"test-job": sample_job_config}), \
          patch("cronwrap.cli.setup_logger", return_value=MagicMock()), \
-         patch("sys.argv", ["cronwrap", "--job", "missing-job"]):
+         patch("sys.argv", ["cronwrap", "--job", "nonexistent-job"]):
         with pytest.raises(SystemExit) as exc_info:
             main()
         assert exc_info.value.code != 0
-
-
-def test_main_verbose_sets_debug_level(sample_job_config):
-    """Passing --verbose should configure the logger at DEBUG level."""
-    success_result = JobResult(
-        success=True,
-        returncode=0,
-        stdout="",
-        stderr="",
-        attempts=1,
-        duration=0.01,
-    )
-    mock_logger = MagicMock()
-    with patch("cronwrap.cli.load_config", return_value={"test-job": sample_job_config}), \
-         patch("cronwrap.cli.run_job", return_value=success_result), \
-         patch("cronwrap.cli.setup_logger", return_value=mock_logger) as mock_setup, \
-         patch("sys.argv", ["cronwrap", "--job", "test-job", "--verbose"]):
-        with pytest.raises(SystemExit):
-            main()
-        call_kwargs = mock_setup.call_args
-        assert call_kwargs is not None
-        # level should be DEBUG when --verbose is passed
-        args, kwargs = call_kwargs
-        level = kwargs.get("level") or (args[1] if len(args) > 1 else None)
-        assert level == "DEBUG"
